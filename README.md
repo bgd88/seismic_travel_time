@@ -1,2 +1,2 @@
 # seismic_travel_time
-Calculate travel times with non-dimensional quadratic ray tracing for arbitrary 1D velocity structures
+fast and robust two-point ray tracing method in layered media with constant velocity layers
