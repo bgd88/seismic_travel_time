@@ -263,6 +263,7 @@ def est_asymptotic_q(X_R, h_k, lmd_k, test_mode=False):
     denom = np.sqrt(1 - np.delete(lmd_k, idx_max)**2)
     m_inf = h_max
     b_inf = np.sum(numer / denom)
+    assert not m_0 == m_inf, "problem here"
     X_asym_int = m_0 * b_inf / (m_0 - m_inf)
     if X_R < X_asym_int:
         q_asymptotic = X_R / m_0
@@ -285,7 +286,7 @@ def p_to_q(p, v_max):
     return np.sqrt(p**2 / (v_max**-2 - p**2))
 
 
-def travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, path_type='direct'):
+def calc_travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, path_type='direct'):
     """
     Calculate travel times of direct waves using non-dim. 
     ray parameter following Fang and Chen 2019.
@@ -323,6 +324,12 @@ def travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, path_type='direct'):
     # Interface depths and velocities (For code readability)
     layer_depths = vel_model[:, 0]
     layer_vels = vel_model[:, 1]
+
+    # Check if in top layer for easy calc. 
+    if src_depth < layer_depths[1]:
+        # Trivial travel time and takeoff angle calc.
+        travel_time = hypo_dist / layer_vels[0]
+        return travel_time
 
     # Equivalent layer thickeness
     layer_thicks = get_equivalent_layer_thicknesses(layer_depths, src_depth, path_type)
