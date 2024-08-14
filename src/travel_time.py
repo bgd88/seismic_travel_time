@@ -247,6 +247,33 @@ def quadratic_newton_iteration(q_i, X_R, h_k, lmd_k):
     return q_list[idx_min], X_list[idx_min]
 
 
+def linear_newton_iteration(q_i, X_R, h_k, lmd_k):
+    """
+    Apply first-order Newton Iteration Step to solve for the ray takeoff angle
+
+    Parameters
+    -------
+    q_i : float
+        Current iteration of the approximate non-dim. ray parameter which arrives at X_R
+    X_R : float
+        Range offset or equivalently epicentral distance in km
+    h_k : array
+        equivalent thickness of k-th layer in km
+    lmd_k : array
+        unitless normalized velocity ratio (i.e. v_k / v_max) of k-th layer
+
+    Returns
+    -------
+    q_new : float
+        Updated q (i.e. q + Delta_{q}^{Newton})
+    """
+    X = calc_range_offset(q_i, h_k, lmd_k)
+    X_prime = calc_range_offset_first_deriv(q_i, h_k, lmd_k)
+    q_new = q_i - X / X_prime
+    X_new = calc_range_offset(q_new, h_k, lmd_k)
+    return q_new, X_new
+
+
 def get_max_vel_layer_index(h_k, v_k): 
     max_vel = np.max(v_k[h_k > 0])
     return np.where(v_k==max_vel)[0][0]
@@ -263,7 +290,6 @@ def est_asymptotic_q(X_R, h_k, lmd_k, test_mode=False):
     denom = np.sqrt(1 - np.delete(lmd_k, idx_max)**2)
     m_inf = h_max
     b_inf = np.sum(numer / denom)
-    assert not m_0 == m_inf, "problem here"
     X_asym_int = m_0 * b_inf / (m_0 - m_inf)
     if X_R < X_asym_int:
         q_asymptotic = X_R / m_0
@@ -286,7 +312,7 @@ def p_to_q(p, v_max):
     return np.sqrt(p**2 / (v_max**-2 - p**2))
 
 
-def calc_travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, path_type='direct'):
+def calc_travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, max_iter=10, path_type='direct'):
     """
     Calculate travel times of direct waves using non-dim. 
     ray parameter following Fang and Chen 2019.
@@ -339,22 +365,43 @@ def calc_travel_time(vel_model, epi_dist, src_depth, tol=1.e-4, path_type='direc
     h_k, v_k = layer_thicks[idx_nonzero], layer_vels[idx_nonzero]
 
     # Normalize velocities by max. vel.
+    # but choose layer that is not too small - if event is just below the 
+    # top of the layer the initial guess is bad. 
     v_max = np.max(v_k)
     # h_max = h_k[np.where(v_k==v_max)[0]][0]
     lmd_k = v_k / v_max     
 
-    q_i = est_asymptotic_q(epi_dist, h_k, lmd_k)
-    X_i = calc_range_offset(q_i, h_k, lmd_k)
-    while np.abs(epi_dist - X_i) > tol:
+    # get asymptotic estimate of q
+    q_0 = est_asymptotic_q(epi_dist, h_k, lmd_k)
+    dist_err_0 = np.abs(epi_dist - calc_range_offset(q_0, h_k, lmd_k))
+
+    # Initialize q
+    q_i = q_0
+    dist_err_i = dist_err_0
+    count = 0
+    while dist_err_i > tol:
         q_i, X_i = quadratic_newton_iteration(q_i, epi_dist, h_k, lmd_k)
-    
+        dist_err_i = np.abs(epi_dist - X_i)
+        count += 1
+        if (dist_err_i > dist_err_0) or (count >= max_iter):
+            print('Quadratic Newton failed! Using brute force...')
+            
+            # Define misfit function
+            def misfit(q):
+                return (epi_dist - calc_range_offset(q, h_k, lmd_k))**2
+            
+            q_i = opt.minimize(misfit, q_i, tol=tol).x[0]
+            X_i = calc_range_offset(q_i, h_k, lmd_k)
+            dist_err_i = np.abs(epi_dist - X_i)
+
+
     # TODO: Derive simple sum for q to get travel time faster
     p = q_to_p(q_i, v_max)
     xi, travel_time = prop_ray(p, h_k, v_k)
     return travel_time
 
 
-def plot_test_asymptotic(epi_dist=100, src_depth=18, tol=1.e-4):
+def plot_test_asymptotic(epi_dist=100, src_depth=18, tol=1.e-4, max_iter=5):
     vel_model = np.array([[0.0, 5.5], [5.0, 5.8], [10., 6.2], [12.5, 4.0], [15., 6.6], [17.5, 10.],
                         [22, 7.2], [32, 7.9], [42, 8.4]])
 
@@ -379,8 +426,8 @@ def plot_test_asymptotic(epi_dist=100, src_depth=18, tol=1.e-4):
     m_0, m_inf, b_inf, X_asym_int, q_est = est_asymptotic_q(epi_dist, h_k, lmd_k,
                                                             test_mode=True)
     
-    q_est = est_asymptotic_q(epi_dist, h_k, lmd_k)
-    qs = np.linspace(0, 1.5*q_est, 200)
+    X_est = calc_range_offset(q_est, h_k, lmd_k)
+    qs = np.linspace(0, 100*q_est, 200)
     # Calculate range offset 
     Xs, Xs2 = [], []
     for q in qs:
@@ -398,21 +445,34 @@ def plot_test_asymptotic(epi_dist=100, src_depth=18, tol=1.e-4):
     plt.plot(qs, m_0 * qs)
     plt.plot(qs, m_inf * qs + b_inf)
     plt.axhline(X_asym_int)
-    plt.axhline(epi_dist)
-    plt.axhline(epi_dist, ls='--', color='k')
-    plt.axvline(q_est)
+    plt.axhline(X_est, ls='--', color='k')
+    plt.axhline(epi_dist, lw=2, color='C3')
+    plt.axvline(q_est, ls='--', color='k')
     plt.ylim([0, max([2*X_asym_int, 1.25* epi_dist])])
     plt.savefig('asy_initial_estimate.png', dpi=300)
     plt.close()
 
-    
+    # Initialize q
     q_list = [q_est]
     q_i = q_est
-    X_i = calc_range_offset(q_est, h_k, lmd_k)
-    while np.abs(epi_dist - X_i) > tol:
+    dist_err_i = dist_err_0 = np.abs(epi_dist - X_est)
+    count = 0
+    while dist_err_i > tol:
         q_i, X_i = quadratic_newton_iteration(q_i, epi_dist, h_k, lmd_k)
         q_list.append(q_i)
-
+        dist_err_i = np.abs(epi_dist - X_i)
+        count += 1
+        if (dist_err_i > dist_err_0) or (count >= max_iter):
+            print('Quadratic Newton failed! Using brute force...')
+            
+            # Define misfit function
+            def misfit(q):
+                return (epi_dist - calc_range_offset(q, h_k, lmd_k))**2
+            
+            q_i = opt.minimize(misfit, q_i, tol=tol).x[0]
+            q_list.append(q_i)
+            X_i = calc_range_offset(q_i, h_k, lmd_k)
+            dist_err_i = np.abs(epi_dist - X_i)
 
     plt.figure()
     for z in layer_depths:
